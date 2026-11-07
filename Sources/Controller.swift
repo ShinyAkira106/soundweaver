@@ -67,6 +67,13 @@ final class Controller: ObservableObject {
     @Published var preferredMacUID: String {
         didSet { defaults.set(preferredMacUID, forKey: "preferredMacUID"); devicesChanged(force: true) }
     }
+    /// Optional display names shown in the panel and HUD; empty means use the device name.
+    @Published var monitorCustomName: String {
+        didSet { defaults.set(monitorCustomName, forKey: "monitorCustomName") }
+    }
+    @Published var macCustomName: String {
+        didSet { defaults.set(macCustomName, forKey: "macCustomName") }
+    }
     @Published var clockIsMac: Bool {
         didSet { defaults.set(clockIsMac, forKey: "clockIsMac"); reapplyRouting() }
     }
@@ -135,6 +142,8 @@ final class Controller: ObservableObject {
     @Published private(set) var loginItemStatus = ""
     @Published private(set) var lastScan = Date()
 
+    let updater = UpdateChecker()
+
     private var aggregateID: AudioObjectID?
     private var ddcMax = 100.0
     private var ddcDisplay: DDCDisplay?
@@ -159,6 +168,16 @@ final class Controller: ObservableObject {
         return (aggregateID != nil && current == aggregateID) || current == monitorDevice?.id
     }
 
+    var monitorTitle: String {
+        let name = monitorCustomName.trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? (monitorDevice?.name ?? "显示器") : name
+    }
+
+    var macTitle: String {
+        let name = macCustomName.trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? (macDevice?.name ?? "MacBook 扬声器") : name
+    }
+
     var isCombinedActive: Bool { mode == .combined && aggregateID != nil }
 
     // MARK: Lifecycle
@@ -168,6 +187,7 @@ final class Controller: ObservableObject {
             "enabled": true, "mode": RouteMode.combined.rawValue,
             "master": 0.4, "monitorLevel": 1.0, "macLevel": 0.6, "syncOffsetMs": 0.0,
             "preferredMonitorUID": "", "preferredMacUID": "",
+            "monitorCustomName": "", "macCustomName": "",
             "clockIsMac": true, "driftCorrection": true,
             "stepCount": 16, "curve": 1.0, "monitorCap": 1.0,
             "useNativeHUD": true, "hudPosition": HUDPosition.topRight.rawValue,
@@ -183,6 +203,8 @@ final class Controller: ObservableObject {
         syncOffsetMs = defaults.double(forKey: "syncOffsetMs")
         preferredMonitorUID = defaults.string(forKey: "preferredMonitorUID") ?? ""
         preferredMacUID = defaults.string(forKey: "preferredMacUID") ?? ""
+        monitorCustomName = defaults.string(forKey: "monitorCustomName") ?? ""
+        macCustomName = defaults.string(forKey: "macCustomName") ?? ""
         clockIsMac = defaults.bool(forKey: "clockIsMac")
         driftCorrection = defaults.bool(forKey: "driftCorrection")
         stepCount = max(8, defaults.integer(forKey: "stepCount"))
@@ -476,10 +498,10 @@ final class Controller: ObservableObject {
         let silent = muted || level == 0
 
         if useNativeHUD,
-           NativeOSD.show(level: level, muted: silent, displayID: displayID, duration: hudDuration) {
+           SystemOSD.show(level: level, muted: silent, displayID: displayID, duration: hudDuration) {
             return
         }
-        let title = isCombinedActive ? "显示器 + MacBook" : (monitorDevice?.name ?? "显示器")
+        let title = isCombinedActive ? "\(monitorTitle) + \(macTitle)" : monitorTitle
         CustomHUD.shared.show(title: title, level: level, muted: silent, on: screen,
                               position: hudPosition, duration: hudDuration)
     }

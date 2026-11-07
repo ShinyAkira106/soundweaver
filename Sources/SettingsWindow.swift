@@ -24,14 +24,14 @@ enum SettingsPage: String, CaseIterable, Identifiable {
 
     var subtitle: String {
         switch self {
-        case .devices: return "选择显示器和 MacBook\n使用的音频设备"
-        case .volume: return "步进、音量曲线与\n显示器音量上限"
-        case .ddc: return "查看硬件连接状态\n读取并重新检测"
-        case .sync: return "消除两路声音之间的\n时间差与时钟漂移"
-        case .hud: return "原生或自绘提示框\n位置与停留时间"
-        case .keys: return "音量键与修饰键\n的行为方式"
-        case .startup: return "开机启动\n退出时恢复输出"
-        case .about: return "版本、作者\n与开源信息"
+        case .devices: return "选择设备并自定义显示名称"
+        case .volume: return "步进、音量曲线与上限"
+        case .ddc: return "连接状态、读取与检测"
+        case .sync: return "时间差与时钟漂移"
+        case .hud: return "样式、位置与停留时间"
+        case .keys: return "音量键与修饰键行为"
+        case .startup: return "开机启动与退出恢复"
+        case .about: return "版本、作者与开源信息"
         }
     }
 
@@ -58,6 +58,7 @@ final class SettingsWindow {
         router.page = page
         if window == nil {
             let hosting = NSHostingController(rootView: SettingsRoot(router: router).environmentObject(controller))
+            hosting.sizingOptions = []
             let window = NSWindow(contentViewController: hosting)
             window.styleMask = [.titled, .closable, .miniaturizable, .fullSizeContentView]
             window.titlebarAppearsTransparent = true
@@ -104,7 +105,7 @@ struct SettingsRoot: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipped()
         }
-        .frame(width: 920, height: 580)
+        .frame(minWidth: 920, maxWidth: .infinity, minHeight: 580, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
         .ignoresSafeArea()
     }
@@ -139,16 +140,17 @@ struct HeroPane: View {
                     .foregroundStyle(.secondary)
                     .padding(.top, 6)
                 Spacer()
-                Button("重新检测设备") {
+                GlassCallToAction(title: "重新检测设备") {
                     c.rescan()
                     flags.a = true
                 }
-                .buttonStyle(PrimaryButtonStyle())
-                Text(flags.a ? "已检测：\(c.monitorDevice?.name ?? "未找到显示器")" : " ")
+                Text(flags.a ? "已检测：\(c.monitorDevice == nil ? "未找到显示器" : c.monitorTitle)" : " ")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.top, 12)
-                Spacer().frame(height: 44)
+                Spacer().frame(height: 28)
+                CopyrightLine()
+                Spacer().frame(height: 14)
             }
             .padding(.horizontal, 24)
         }
@@ -165,17 +167,6 @@ struct WovenBackdrop: View {
                 var path = Path()
                 path.addEllipse(in: CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2))
                 context.stroke(path, with: .color(Brand.violet.opacity(0.10 - Double(i) * 0.02)), lineWidth: 1.5)
-            }
-            for (i, color) in [Brand.coral, Brand.sky].enumerated() {
-                var wave = Path()
-                let amp: CGFloat = 16
-                let y0 = center.y + 132 + CGFloat(i) * 8
-                for x in stride(from: CGFloat(20), through: size.width - 20, by: 2) {
-                    let t = (x / size.width) * .pi * 4
-                    let y = y0 + amp * sin(t + CGFloat(i) * .pi)
-                    if x == 20 { wave.move(to: CGPoint(x: x, y: y)) } else { wave.addLine(to: CGPoint(x: x, y: y)) }
-                }
-                context.stroke(wave, with: .color(color.opacity(0.22)), lineWidth: 2)
             }
         }
         .allowsHitTesting(false)
@@ -198,7 +189,7 @@ struct TopicGrid: View {
                     TopicTile(page: page) { open(page) }
                 }
             }
-            .padding(.horizontal, 56)
+            .padding(.horizontal, 40)
             Spacer(minLength: 20)
             HStack {
                 Spacer()
@@ -224,7 +215,7 @@ struct TopicTile: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(alignment: .top, spacing: 18) {
+            HStack(alignment: .top, spacing: 14) {
                 Image(systemName: page.icon)
                     .font(.system(size: 30, weight: .light))
                     .foregroundStyle(hover.a ? AnyShapeStyle(Brand.violet) : AnyShapeStyle(.secondary))
@@ -369,6 +360,16 @@ struct DevicesPage: View {
             .labelsHidden()
             .frame(width: 240)
         }
+        SettingRow(title: "显示器名称", detail: "在菜单栏面板和提示框中显示，留空则使用设备名") {
+            TextField("", text: $c.monitorCustomName, prompt: Text(c.monitorDevice?.name ?? "显示器"))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 240)
+        }
+        SettingRow(title: "MacBook 名称", detail: "留空则使用设备名") {
+            TextField("", text: $c.macCustomName, prompt: Text(c.macDevice?.name ?? "MacBook 扬声器"))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 240)
+        }
         SettingRow(title: "输出模式", detail: "仅显示器模式下 MacBook 扬声器保持静默", divider: false) {
             Picker("", selection: $c.mode) {
                 Text("显示器 + MacBook").tag(RouteMode.combined)
@@ -471,7 +472,7 @@ struct SyncPage: View {
 struct HUDPage: View {
     @EnvironmentObject var c: Controller
     var body: some View {
-        SettingRow(title: "使用系统原生提示框", detail: "调用 macOS 自带的音量提示框；若不显示请关闭，改用自绘提示框") {
+        SettingRow(title: "使用系统提示框", detail: "由 macOS 自己绘制音量提示（在 macOS 26 及以后为经典样式）；关闭则使用 Soundweaver 的玻璃提示框，可显示自定义名称") {
             Toggle("", isOn: $c.useNativeHUD).toggleStyle(.switch).labelsHidden()
         }
         SettingRow(title: "自绘提示框位置") {
@@ -539,14 +540,54 @@ struct StartupPage: View {
 struct AboutPage: View {
     @EnvironmentObject var c: Controller
     var body: some View {
-        SettingRow(title: "版本") { Text(c.appVersion).foregroundStyle(.secondary) }
+        SettingRow(title: "版本") { Text("v\(c.appVersion)").foregroundStyle(.secondary) }
+        UpdateRows(updater: c.updater)
         SettingRow(title: "作者") { Text("ShinyAkira").foregroundStyle(.secondary) }
         SettingRow(title: "开源许可") { Text("MIT License").foregroundStyle(.secondary) }
         SettingRow(title: "源代码") {
-            Link("github.com/ShinyAkira106", destination: URL(string: "https://github.com/ShinyAkira106")!)
+            Link("github.com/ShinyAkira106/Soundweaver",
+                 destination: URL(string: "https://github.com/ShinyAkira106/Soundweaver")!)
         }
         SettingRow(title: "致谢", detail: "DDC 与原生提示框的实现思路参考了 MonitorControl 和 m1ddc", divider: false) {
             EmptyView()
+        }
+    }
+}
+
+struct UpdateRows: View {
+    @ObservedObject var updater: UpdateChecker
+
+    var statusText: String {
+        switch updater.status {
+        case .idle:
+            if let last = updater.lastChecked {
+                return "上次检查：\(last.formatted(date: .abbreviated, time: .shortened))"
+            }
+            return "从 GitHub Releases 获取最新版本"
+        case .checking: return "正在检查…"
+        case .upToDate: return "已是最新版本"
+        case let .available(version, _, _): return "发现新版本 v\(version)"
+        case let .failed(message): return message
+        }
+    }
+
+    var body: some View {
+        SettingRow(title: "检查更新", detail: statusText) {
+            HStack(spacing: 8) {
+                if updater.status == .checking {
+                    ProgressView().controlSize(.small)
+                }
+                if updater.availableVersion != nil {
+                    Button("前往下载") { updater.openReleasePage() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Brand.violet)
+                }
+                Button("立即检查") { updater.check() }
+                    .disabled(updater.status == .checking)
+            }
+        }
+        SettingRow(title: "自动检查更新", detail: "每天最多检查一次，有新版本时在菜单栏面板中提示") {
+            Toggle("", isOn: $updater.autoCheck).toggleStyle(.switch).labelsHidden()
         }
     }
 }

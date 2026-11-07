@@ -24,7 +24,19 @@ swiftc -O -parse-as-library \
 cp Info.plist "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources"
 iconutil -c icns Resources/AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
-codesign --force --sign - "$APP"
+# Sign with a stable local certificate so macOS keeps the Accessibility permission
+# across updates. Falls back to an ad hoc signature if that is not possible.
+SIGN_ID="Soundweaver Local Signing"
+if ! security find-certificate -c "$SIGN_ID" >/dev/null 2>&1; then
+  ./setup_signing.sh || true
+fi
+if security find-certificate -c "$SIGN_ID" >/dev/null 2>&1 \
+   && codesign --force --sign "$SIGN_ID" "$APP" 2>/dev/null; then
+  echo "Signed with \"$SIGN_ID\""
+else
+  codesign --force --sign - "$APP"
+  echo "Signed ad hoc (Accessibility permission will need to be granted again after this update)"
+fi
 echo "Built $APP"
 
 if [[ "${1:-}" == "install" ]]; then
