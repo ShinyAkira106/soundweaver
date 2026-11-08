@@ -186,10 +186,97 @@ enum AudioSystem {
         if let id = device(forUID: uid) { destroyAggregate(id) }
     }
 
+    // MARK: Extra queries used by the software mix engine
+
+    static func outputStreamCount(_ device: AudioObjectID) -> Int {
+        var addr = address(kAudioDevicePropertyStreams, kAudioDevicePropertyScopeOutput)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(device, &addr, 0, nil, &size) == noErr else { return 0 }
+        return Int(size) / MemoryLayout<AudioStreamID>.size
+    }
+
+    /// The system's volume for an output device, 0...1.
+    static func volumeScalar(_ device: AudioObjectID) -> Float32? {
+        var value: Float32 = 0
+        var size = UInt32(MemoryLayout<Float32>.size)
+        var main = address(kAudioHardwareServiceDeviceProperty_VirtualMainVolume, kAudioDevicePropertyScopeOutput)
+        if AudioObjectHasProperty(device, &main),
+           AudioObjectGetPropertyData(device, &main, 0, nil, &size, &value) == noErr {
+            return value
+        }
+        for channel: AudioObjectPropertyElement in [kAudioObjectPropertyElementMain, 1] {
+            var addr = address(kAudioDevicePropertyVolumeScalar, kAudioDevicePropertyScopeOutput, channel)
+            if AudioObjectHasProperty(device, &addr),
+               AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &value) == noErr {
+                return value
+            }
+        }
+        return nil
+    }
+
+    /// The device's current volume in decibels, so a software gain can follow it exactly.
+    static func volumeDecibels(_ device: AudioObjectID) -> Float32? {
+        var value: Float32 = 0
+        var size = UInt32(MemoryLayout<Float32>.size)
+        for channel: AudioObjectPropertyElement in [kAudioObjectPropertyElementMain, 1] {
+            var addr = address(kAudioDevicePropertyVolumeDecibels, kAudioDevicePropertyScopeOutput, channel)
+            if AudioObjectHasProperty(device, &addr),
+               AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &value) == noErr {
+                return value
+            }
+        }
+        return nil
+    }
+
+    static func isMuted(_ device: AudioObjectID) -> Bool {
+        var addr = address(kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput)
+        guard AudioObjectHasProperty(device, &addr) else { return false }
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &value) == noErr else { return false }
+        return value != 0
+    }
+
+    /// Core Audio's object for a process, used to keep our own audio out of the tap.
+    static func processObject(pid: pid_t) -> AudioObjectID? {
+        var addr = address(kAudioHardwarePropertyTranslatePIDToProcessObject)
+        var qualifier = pid
+        var object = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        let status = AudioObjectGetPropertyData(system, &addr, UInt32(MemoryLayout<pid_t>.size), &qualifier,
+                                                &size, &object)
+        return status == noErr && object != kAudioObjectUnknown ? object : nil
+    }
+
     // MARK: Listeners
 
     static func onSystemChange(_ selector: AudioObjectPropertySelector, _ block: @escaping () -> Void) {
         var addr = address(selector)
         AudioObjectAddPropertyListenerBlock(system, &addr, DispatchQueue.main) { _, _ in block() }
     }
+
+    /// Listens to a property on one device. Keep the returned token and pass it to
+    /// `removeListener` when the device is no longer watched.
+    static func addListener(_ device: AudioObjectID, _ selector: AudioObjectPropertySelector,
+                            _ scope: AudioObjectPropertyScope,
+                            _ element: AudioObjectPropertyElement = kAudioObjectPropertyElementMain,
+                            _ block: @escaping () -> Void) -> DeviceListener? {
+        var addr = address(selector, scope, element)
+        guard AudioObjectHasProperty(device, &addr) else { return nil }
+        let listenerBlock: AudioObjectPropertyListenerBlock = { _, _ in block() }
+        guard AudioObjectAddPropertyListenerBlock(device, &addr, DispatchQueue.main, listenerBlock) == noErr
+        else { return nil }
+        return DeviceListener(device: device, address: addr, block: listenerBlock)
+    }
+
+    static func removeListener(_ listener: DeviceListener) {
+        var addr = listener.address
+        AudioObjectRemovePropertyListenerBlock(listener.device, &addr, DispatchQueue.main, listener.block)
+    }
+}
+
+struct DeviceListener {
+    let device: AudioObjectID
+    let address: AudioObjectPropertyAddress
+    let block: AudioObjectPropertyListenerBlock
 }

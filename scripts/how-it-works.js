@@ -1,5 +1,5 @@
 // Renders docs/images/how-it-works.png: the "How it works" card strip for the README, in
-// English, Chinese and Japanese at once. Laid out in HTML and captured with Playwright,
+// English and Chinese at once. Laid out in HTML and captured with Playwright,
 // because a README cannot carry its own styles. The menu bar, panel and HUD are drawn mocks
 // and the numbers are examples.
 //   npm install playwright   (once)
@@ -27,7 +27,6 @@ const HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
 *{box-sizing:border-box}
 html,body{margin:0;background:#fff}
 body{width:1200px;padding:56px 64px 60px;font-family:Inter,"Noto Sans CJK SC",sans-serif;color:var(--ink);-webkit-font-smoothing:antialiased}
-[lang=ja]{font-family:Inter,"Noto Sans CJK JP",sans-serif}
 [lang=zh-CN]{font-family:Inter,"Noto Sans CJK SC",sans-serif}
 h1{margin:0;font-size:42px;letter-spacing:-.02em;font-weight:700;line-height:1.1}
 h1 small{font-size:22px;font-weight:600;color:var(--soft);letter-spacing:0;margin-left:14px}
@@ -74,7 +73,7 @@ h1 small{font-size:22px;font-weight:600;color:var(--soft);letter-spacing:0;margi
 .out{position:absolute;right:16px;width:122px;padding:8px 10px;border-radius:12px;background:#fff;border:1px solid #e6e6e6;box-shadow:0 4px 10px rgba(0,0,0,.04)}
 .out b{display:flex;align-items:center;gap:6px;font-size:12px;color:#2b2e31}
 .out .dot{width:8px;height:8px;border-radius:50%}
-.out small{display:block;margin-top:2px;font-size:10.5px;color:var(--soft)}
+.out small{display:block;margin-top:1px;font-size:10.5px;line-height:1.35;color:var(--soft)}
 .out .lvl{margin-top:6px;height:5px;border-radius:999px;background:#eee;overflow:hidden}
 .out .lvl i{display:block;height:100%;border-radius:999px}
 .lane-label{position:absolute;left:112px;top:156px;width:100px;text-align:center;font-size:11px;line-height:1.5;color:var(--soft)}
@@ -99,20 +98,18 @@ h1 small{font-size:22px;font-weight:600;color:var(--soft);letter-spacing:0;margi
 .cta{display:flex;align-items:center;gap:10px;height:50px;padding:0 26px;border-radius:999px;background:#0e0f10;color:#fff;font-size:17px;font-weight:600}
 .cta span{font-weight:500;color:#b9bdc1;font-size:14px}
 </style></head><body>
-<h1>How it works. <small lang="zh-CN">工作原理</small><small lang="ja">仕組み</small></h1>
-<p class="lead">Install it once, then let it weave: every press of a volume key sets your monitor over DDC and your MacBook speakers together, each at its own share.
-  <span lang="zh-CN">装好一次就不用管：每按一次音量键，显示器（通过 DDC）和 MacBook 扬声器都会一起变化，各自按设定的比例。</span>
-  <span lang="ja">一度入れるだけ。音量キーを押すたびに、モニター（DDC 経由）と MacBook のスピーカーが、それぞれの割合で一緒に変わります。</span></p>
+<h1>How it works. <small lang="zh-CN">工作原理</small></h1>
+<p class="lead">Install it once, then let it weave: every sound your Mac plays is captured once and sent to your monitor and your MacBook speakers together, each at its own share.
+  <span lang="zh-CN">装好一次就不用管：Mac 播放的所有声音只捕获一次，同时送到显示器和 MacBook 扬声器，各自按设定的比例。</span></p>
 
 <div class="cards">
   <section class="card">
     <div class="top">
       <div class="num">1</div>
       <div class="title">Install once</div>
-      <div class="alt"><span lang="zh-CN">装一次</span><i>·</i><span lang="ja">一度入れるだけ</span></div>
+      <div class="alt"><span lang="zh-CN">装一次就好</span></div>
       <div class="desc">Drag it into Applications. A woven waveform joins the menu bar.
-        <span lang="zh-CN">拖进“应用程序”，菜单栏会多一个声波图标。</span>
-        <span lang="ja">アプリケーションへドラッグすると、メニューバーに波形アイコンが加わります。</span></div>
+        <span lang="zh-CN">拖进“应用程序”，菜单栏会多一个声波图标。</span></div>
     </div>
     <div class="art">
       <div class="desk">
@@ -132,11 +129,10 @@ h1 small{font-size:22px;font-weight:600;color:var(--soft);letter-spacing:0;margi
   <section class="card">
     <div class="top">
       <div class="num">2</div>
-      <div class="title">Just press the keys</div>
-      <div class="alt"><span lang="zh-CN">照常按音量键</span><i>·</i><span lang="ja">いつも通りキーを押す</span></div>
-      <div class="desc">One press, two outputs: the monitor over DDC, the MacBook via Core Audio.
-        <span lang="zh-CN">一次按键两路输出：显示器走 DDC，MacBook 走系统音量。</span>
-        <span lang="ja">1 回で 2 つの出力へ。モニターは DDC、MacBook はシステム音量。</span></div>
+      <div class="title">Every sound, two outputs</div>
+      <div class="alt"><span lang="zh-CN">所有声音，两路输出</span></div>
+      <div class="desc">System audio is captured once and woven into both outputs, each at its own gain. No DDC needed.
+        <span lang="zh-CN">系统声音只捕获一次，按各自的音量同时送到两路输出，不需要 DDC。</span></div>
     </div>
     <div class="art">
       <svg class="lane" width="345" height="250" viewBox="0 0 345 250">
@@ -144,36 +140,35 @@ h1 small{font-size:22px;font-weight:600;color:var(--soft);letter-spacing:0;margi
           <path d="M88 52C125 52 120 118 146 122" stroke="#cfcbe0"/>
           <path d="M88 125H146" stroke="#cfcbe0"/>
           <path d="M88 198C125 198 120 132 146 128" stroke="#cfcbe0"/>
-          <path d="M180 118C204 110 196 66 207 62" stroke="var(--coral)"/>
-          <path d="M180 132C204 140 196 184 207 188" stroke="var(--sky)"/>
+          <path d="M180 118C204 110 196 66 207 60" stroke="var(--coral)"/>
+          <path d="M180 132C204 140 196 180 207 186" stroke="var(--sky)"/>
         </g>
       </svg>
-      <div class="key" style="top:35px">F10 <small>mute</small></div>
-      <div class="key" style="top:108px">F11 <small>−</small></div>
-      <div class="key" style="top:181px">F12 <small>+</small></div>
+      <div class="key" style="top:35px">Music</div>
+      <div class="key" style="top:108px">Safari</div>
+      <div class="key" style="top:181px">Video</div>
       <div class="hub">${WAVE(20, "#fff")}</div>
-      <div class="out" style="top:30px"><b><span class="dot" style="background:var(--coral)"></span>L27h-4A</b><small>DDC · VCP 0x62</small><div class="lvl"><i style="width:60%;background:var(--coral)"></i></div></div>
-      <div class="out" style="top:156px"><b><span class="dot" style="background:var(--sky)"></span>MacBook</b><small>Core Audio</small><div class="lvl"><i style="width:100%;background:var(--sky)"></i></div></div>
+      <div class="out" style="top:22px"><b><span class="dot" style="background:var(--coral)"></span>L27h-4A</b><small>software gain</small><small>软件增益</small><div class="lvl"><i style="width:60%;background:var(--coral)"></i></div></div>
+      <div class="out" style="top:146px"><b><span class="dot" style="background:var(--sky)"></span>MacBook</b><small>system volume</small><small>系统音量</small><div class="lvl"><i style="width:100%;background:var(--sky)"></i></div></div>
     </div>
   </section>
 
   <section class="card">
     <div class="top">
       <div class="num">3</div>
-      <div class="title">One HUD for both</div>
-      <div class="alt"><span lang="zh-CN">一个提示框</span><i>·</i><span lang="ja">HUD はひとつ</span></div>
-      <div class="desc">Set the balance once. The HUD shows the level and the outputs that are playing.
-        <span lang="zh-CN">比例设一次就好，提示框显示音量和正在发声的设备。</span>
-        <span lang="ja">割合は一度決めるだけ。HUD に音量と再生中の出力が表示されます。</span></div>
+      <div class="title">Native keys and HUD</div>
+      <div class="alt"><span lang="zh-CN">原生音量键和提示框</span></div>
+      <div class="desc">The volume keys stay with macOS. The monitor follows your MacBook's volume in decibels.
+        <span lang="zh-CN">音量键仍由 macOS 处理，显示器的音量按分贝跟随 MacBook。</span></div>
     </div>
     <div class="art">
       <div class="stats">
         <div class="chip"><b>56%</b>volume · 音量</div>
-        <div class="chip"><b>2</b>outputs · 输出</div>
+        <div class="chip"><b>0</b>DDC needed · 无需 DDC</div>
       </div>
       <div class="desk" style="top:118px">
         <div class="hud">
-          <div class="name">L27h-4A + MacBook Pro Speakers</div>
+          <div class="name">MacBook Pro Speakers</div>
           <div class="line">${SPEAKER}<div class="track"><b style="width:56%"></b></div>${SPEAKER_LOUD}</div>
           <div class="ticks">${"<i></i>".repeat(17)}</div>
         </div>
@@ -184,11 +179,11 @@ h1 small{font-size:22px;font-weight:600;color:var(--soft);letter-spacing:0;margi
 
 <div class="foot">
   <div class="chips">Also works with
-    <span class="tagpill">USB-C · DisplayPort</span>
-    <span class="tagpill">Native HUD<small lang="zh-CN">系统提示框</small></span>
-    <span class="tagpill">Launch at login<small lang="ja">自動起動</small><small lang="zh-CN">开机启动</small></span>
+    <span class="tagpill">USB-C · DisplayPort · HDMI</span>
+    <span class="tagpill">Any monitor speakers<small lang="zh-CN">任意显示器音箱</small></span>
+    <span class="tagpill">Launch at login<small lang="zh-CN">开机启动</small></span>
   </div>
-  <div class="cta">Download <span lang="zh-CN">下载</span><span lang="ja">ダウンロード</span>
+  <div class="cta">Download <span lang="zh-CN">下载</span>
     <svg width="18" height="18" viewBox="0 0 18 18"><path d="M4 9h10M10 5l4 4-4 4" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
 </div>
 </body></html>`;

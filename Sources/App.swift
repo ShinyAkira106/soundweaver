@@ -54,7 +54,7 @@ struct MenuPanel: View {
 
             // Monitor
             CardHeader(icon: "display", title: c.monitorTitle,
-                       badge: c.ddcConnected ? nil : "!", isOn: monitorOn)
+                       badge: (c.usesSoftware || c.ddcConnected) ? nil : "!", isOn: monitorOn)
                 .padding(.top, 3)
                 .disabled(!c.enabled)
             Group {
@@ -63,7 +63,7 @@ struct MenuPanel: View {
                     PillSlider(icon: "gauge.with.dots.needle.67percent", value: $c.monitorCap,
                                range: 0.1...1, step: 0.05,
                                label: { "上限 \(Int(($0 * 100).rounded()))%" })
-                    Text(c.ddcStatus)
+                    Text(c.usesSoftware ? "软件混音：显示器音量跟随 MacBook 系统音量" : c.ddcStatus)
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 4)
@@ -94,7 +94,18 @@ struct MenuPanel: View {
             .disabled(!c.enabled)
             ExpandChevron(expanded: $flags.b)
 
-            if !c.accessibilityGranted {
+            if c.usesSoftware {
+                if c.enabled && !c.engineRunning && !c.captureGranted {
+                    Button {
+                        c.openAudioCaptureSettings()
+                    } label: {
+                        Label("需要“系统录音”权限才能混音", systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.link)
+                    .padding(.horizontal, 6)
+                }
+            } else if !c.accessibilityGranted {
                 Button {
                     c.openAccessibilitySettings()
                 } label: {

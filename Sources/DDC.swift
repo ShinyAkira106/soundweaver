@@ -101,6 +101,8 @@ final class DDCVolumeWriter {
     private var pending: UInt16?
     private var draining = false
     private var display: DDCDisplay?
+    /// Called on the main queue after each write with whether the monitor accepted it.
+    var onResult: ((Bool) -> Void)?
 
     func attach(_ display: DDCDisplay) {
         lock.lock(); self.display = display; lock.unlock()
@@ -122,7 +124,10 @@ final class DDCVolumeWriter {
             pending = nil
             let target = display
             lock.unlock()
-            target?.write(VCP.volume, value)
+            let ok = target?.write(VCP.volume, value) ?? false
+            if let callback = onResult {
+                DispatchQueue.main.async { callback(ok) }
+            }
         }
     }
 }

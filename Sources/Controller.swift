@@ -2,6 +2,7 @@
 // App state: routing (Multi Output or monitor only), volume math, key handling, HUD, settings.
 
 import AppKit
+import AudioToolbox
 import CoreAudio
 import ServiceManagement
 import SwiftUI
@@ -9,6 +10,20 @@ import SwiftUI
 enum RouteMode: String, CaseIterable, Identifiable {
     case combined, monitorOnly
     var id: String { rawValue }
+}
+
+/// How the monitor's volume is controlled.
+enum VolumeEngine: String, CaseIterable, Identifiable {
+    /// Soundweaver scales the monitor's audio itself (process tap, macOS 14.2 and later).
+    case software
+    /// The monitor's hardware volume over DDC/CI.
+    case ddc
+    var id: String { rawValue }
+
+    static var softwareAvailable: Bool {
+        if #available(macOS 14.2, *) { return true }
+        return false
+    }
 }
 
 enum HUDScreen: String, CaseIterable, Identifiable {
@@ -34,11 +49,25 @@ final class Controller: ObservableObject {
     @Published var enabled: Bool {
         didSet { defaults.set(enabled, forKey: "enabled"); enabled ? activate() : deactivate() }
     }
+    @Published var engineMode: VolumeEngine {
+        didSet { defaults.set(engineMode.rawValue, forKey: "volumeEngine"); if enabled { activate() } }
+    }
     @Published var mode: RouteMode {
-        didSet { defaults.set(mode.rawValue, forKey: "mode"); if enabled { activate() } }
+        didSet {
+            defaults.set(mode.rawValue, forKey: "mode")
+            // In software mode the MacBook switch is just a gain; no need to rebuild anything.
+            if usesSoftware { applyVolumes() } else if enabled { activate() }
+        }
     }
     @Published var master: Double {
-        didSet { defaults.set(master, forKey: "master"); applyVolumes() }
+        didSet {
+            defaults.set(master, forKey: "master")
+            // Software mode: the master volume is the MacBook's own system volume.
+            if usesSoftware, !syncingFromDevice, let mac = macDevice {
+                AudioSystem.setVolume(mac.id, Float32(master))
+            }
+            applyVolumes()
+        }
     }
     @Published var monitorLevel: Double {
         didSet { defaults.set(monitorLevel, forKey: "monitorLevel"); applyVolumes() }
@@ -47,7 +76,10 @@ final class Controller: ObservableObject {
         didSet { defaults.set(macLevel, forKey: "macLevel"); applyVolumes() }
     }
     @Published var muted = false {
-        didSet { applyVolumes() }
+        didSet {
+            if usesSoftware, !syncingFromDevice, let mac = macDevice { AudioSystem.setMute(mac.id, muted) }
+            applyVolumes()
+        }
     }
     /// Silences only the monitor (and the speakers on its jack) while the MacBook keeps playing.
     @Published var monitorMuted = false {
@@ -141,6 +173,8 @@ final class Controller: ObservableObject {
     @Published private(set) var accessibilityGranted = false
     @Published private(set) var loginItemStatus = ""
     @Published private(set) var lastScan = Date()
+    @Published private(set) var engineRunning = false
+    @Published private(set) var engineStatus = ""
 
     let updater = UpdateChecker()
 
@@ -150,6 +184,15 @@ final class Controller: ObservableObject {
     private let ddc = DDCVolumeWriter()
     private let keyTap = MediaKeyTap()
     private var trustTimer: Timer?
+    private var tapEngine: AnyObject?
+    private var macListeners: [DeviceListener] = []
+    private var syncingFromDevice = false
+    private var captureRequested = false
+    private var capturePollTimer: Timer?
+
+    var usesSoftware: Bool { engineMode == .software && VolumeEngine.softwareAvailable }
+
+    var captureGranted: Bool { AudioCapturePermission.state == .granted }
 
     var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0"
@@ -178,13 +221,28 @@ final class Controller: ObservableObject {
         return name.isEmpty ? (macDevice?.name ?? "MacBook 扬声器") : name
     }
 
-    var isCombinedActive: Bool { mode == .combined && aggregateID != nil }
+    var isCombinedActive: Bool {
+        mode == .combined && (usesSoftware ? engineRunning : aggregateID != nil)
+    }
+
+    /// What is actually audible right now, used by the HUD title and the status line.
+    var activeOutputsTitle: String {
+        let monitorOn = !monitorMuted && monitorLevel > 0.001
+        let macOn = isCombinedActive && macLevel > 0.001
+        switch (monitorOn, macOn) {
+        case (true, true): return "\(monitorTitle) + \(macTitle)"
+        case (true, false): return monitorTitle
+        case (false, true): return macTitle
+        default: return "全部静音"
+        }
+    }
 
     // MARK: Lifecycle
 
     init() {
         defaults.register(defaults: [
             "enabled": true, "mode": RouteMode.combined.rawValue,
+            "volumeEngine": VolumeEngine.softwareAvailable ? VolumeEngine.software.rawValue : VolumeEngine.ddc.rawValue,
             "master": 0.4, "monitorLevel": 1.0, "macLevel": 0.6, "syncOffsetMs": 0.0,
             "preferredMonitorUID": "", "preferredMacUID": "",
             "monitorCustomName": "", "macCustomName": "",
@@ -196,6 +254,8 @@ final class Controller: ObservableObject {
             "restoreOnQuit": true, "syncFromMonitorOnLaunch": false,
         ])
         enabled = defaults.bool(forKey: "enabled")
+        let storedEngine = VolumeEngine(rawValue: defaults.string(forKey: "volumeEngine") ?? "") ?? .software
+        engineMode = VolumeEngine.softwareAvailable ? storedEngine : .ddc
         mode = RouteMode(rawValue: defaults.string(forKey: "mode") ?? "") ?? .combined
         master = defaults.double(forKey: "master")
         monitorLevel = defaults.double(forKey: "monitorLevel")
@@ -225,12 +285,17 @@ final class Controller: ObservableObject {
         refreshDevices()
         connectDDC(isLaunch: true)
         setupKeys()
+        ddc.onResult = { [weak self] ok in
+            guard let self, !ok, !self.usesSoftware else { return }
+            self.ddcStatus = "写入失败：显示器没有接受音量命令"
+        }
 
         AudioSystem.onSystemChange(kAudioHardwarePropertyDevices) { [weak self] in self?.devicesChanged(force: false) }
-        AudioSystem.onSystemChange(kAudioHardwarePropertyDefaultOutputDevice) { [weak self] in self?.updateRouteStatus() }
+        AudioSystem.onSystemChange(kAudioHardwarePropertyDefaultOutputDevice) { [weak self] in self?.defaultOutputChanged() }
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
                                                object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
+            self.stopEngine()
             if self.restoreOnQuit { self.deactivate() } else { self.destroyAggregate() }
         }
 
@@ -270,8 +335,171 @@ final class Controller: ObservableObject {
         lastScan = Date()
     }
 
-    /// Builds the route for the current mode and makes it the system output.
+    /// Builds the route for the current engine and mode.
     func activate() {
+        if usesSoftware {
+            activateSoftware()
+        } else {
+            stopEngine()
+            removeMacListeners()
+            activateHardware()
+        }
+    }
+
+    // MARK: Software mix engine
+
+    private func activateSoftware() {
+        destroyAggregate()
+        guard let monitor = monitorDevice, let mac = macDevice else {
+            stopEngine()
+            updateRouteStatus()
+            return
+        }
+        let current = AudioSystem.defaultOutput()
+        if current != mac.id, current != monitor.id,
+           let uid = AudioSystem.uid(of: current), uid != Self.aggregateUID {
+            defaults.set(uid, forKey: "restoreUID")
+        }
+        // The system output stays on the MacBook speakers: real volume, native keys and HUD.
+        if current != mac.id { AudioSystem.setDefaultOutput(mac.id) }
+        watchMacDevice(mac)
+        syncFromMacDevice()
+        startEngine()
+    }
+
+    private func startEngine() {
+        guard enabled, usesSoftware, let mac = macDevice, let monitor = monitorDevice else { return }
+        guard AudioSystem.defaultOutput() == mac.id else {
+            stopEngine()
+            updateRouteStatus()
+            return
+        }
+        guard #available(macOS 14.2, *) else { return }
+
+        switch AudioCapturePermission.state {
+        case .denied:
+            stopEngine()
+            engineStatus = "需要“系统录音”权限才能混音"
+            updateRouteStatus()
+            waitForCapturePermission()
+            return
+        case .unknown where !captureRequested:
+            captureRequested = true
+            AudioCapturePermission.request { [weak self] granted in
+                guard let self else { return }
+                if granted {
+                    self.startEngine()
+                } else {
+                    self.engineStatus = "需要“系统录音”权限才能混音"
+                    self.updateRouteStatus()
+                    self.waitForCapturePermission()
+                }
+            }
+            return
+        default:
+            break
+        }
+
+        let engine = (tapEngine as? TapEngine) ?? TapEngine()
+        tapEngine = engine
+        let rate = AudioSystem.nominalSampleRate(mac.id) ?? 48_000
+        let frames = UInt32((abs(syncOffsetMs) * rate / 1000).rounded())
+        do {
+            try engine.start(macUID: mac.uid, monitorUID: monitor.uid,
+                             macOutputStreams: AudioSystem.outputStreamCount(mac.id),
+                             macExtraLatency: syncOffsetMs > 0 ? frames : 0,
+                             monitorExtraLatency: syncOffsetMs < 0 ? frames : 0,
+                             clockIsMac: clockIsMac, driftCorrection: driftCorrection)
+            engineRunning = true
+            engineStatus = ""
+        } catch {
+            engineRunning = false
+            engineStatus = "软件混音启动失败：\(error)"
+        }
+        applyVolumes()
+        updateRouteStatus()
+    }
+
+    /// Starts the engine as soon as the permission is switched on in System Settings.
+    private func waitForCapturePermission() {
+        guard capturePollTimer == nil else { return }
+        capturePollTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
+            guard let self, self.usesSoftware, self.enabled else {
+                timer.invalidate()
+                self?.capturePollTimer = nil
+                return
+            }
+            if AudioCapturePermission.state == .granted {
+                timer.invalidate()
+                self.capturePollTimer = nil
+                self.engineStatus = ""
+                self.startEngine()
+            }
+        }
+    }
+
+    private func stopEngine() {
+        if #available(macOS 14.2, *), let engine = tapEngine as? TapEngine { engine.stop() }
+        engineRunning = false
+    }
+
+    private func defaultOutputChanged() {
+        if enabled && usesSoftware {
+            if AudioSystem.defaultOutput() == macDevice?.id {
+                if !engineRunning { startEngine() }
+            } else {
+                // The user picked AirPods or something else: release every app's audio.
+                stopEngine()
+            }
+        }
+        updateRouteStatus()
+    }
+
+    private func watchMacDevice(_ mac: AudioDevice) {
+        removeMacListeners()
+        let scope = kAudioDevicePropertyScopeOutput
+        let watched: [(AudioObjectPropertySelector, AudioObjectPropertyElement)] = [
+            (kAudioHardwareServiceDeviceProperty_VirtualMainVolume, kAudioObjectPropertyElementMain),
+            (kAudioDevicePropertyVolumeScalar, kAudioObjectPropertyElementMain),
+            (kAudioDevicePropertyVolumeScalar, 1),
+            (kAudioDevicePropertyMute, kAudioObjectPropertyElementMain),
+        ]
+        for (selector, element) in watched {
+            if let listener = AudioSystem.addListener(mac.id, selector, scope, element, { [weak self] in
+                self?.syncFromMacDevice()
+            }) {
+                macListeners.append(listener)
+            }
+        }
+    }
+
+    private func removeMacListeners() {
+        macListeners.forEach(AudioSystem.removeListener)
+        macListeners.removeAll()
+    }
+
+    /// Pulls the MacBook's system volume and mute into the panel and recomputes the gains.
+    private func syncFromMacDevice() {
+        guard usesSoftware, let mac = macDevice else { return }
+        syncingFromDevice = true
+        if let scalar = AudioSystem.volumeScalar(mac.id), abs(Double(scalar) - master) > 0.0005 {
+            master = Double(scalar)
+        }
+        let deviceMuted = AudioSystem.isMuted(mac.id)
+        if deviceMuted != muted { muted = deviceMuted }
+        syncingFromDevice = false
+        applyVolumes()
+    }
+
+    func openAudioCaptureSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    // MARK: Hardware (DDC) route
+
+    private func activateHardware() {
         // Remember what the user had selected before we take over (read before tearing down).
         let current = AudioSystem.defaultOutput()
         if current != monitorDevice?.id, let uid = AudioSystem.uid(of: current), uid != Self.aggregateUID {
@@ -320,6 +548,8 @@ final class Controller: ObservableObject {
 
     /// Hands the output back to whatever was selected before and removes our aggregate.
     func deactivate() {
+        stopEngine()
+        removeMacListeners()
         let current = AudioSystem.defaultOutput()
         if (aggregateID != nil && current == aggregateID) || current == monitorDevice?.id {
             if let uid = defaults.string(forKey: "restoreUID"), let id = AudioSystem.device(forUID: uid) {
@@ -334,7 +564,7 @@ final class Controller: ObservableObject {
 
     /// Rebuilds the aggregate, used after changing sync or clock settings.
     func reapplyRouting() {
-        if enabled && mode == .combined { activate() }
+        if enabled && (mode == .combined || usesSoftware) { activate() }
     }
 
     private func destroyAggregate() {
@@ -343,11 +573,25 @@ final class Controller: ObservableObject {
     }
 
     private func updateRouteStatus() {
-        guard enabled else { routeStatus = "已暂停，音量键由系统处理"; return }
-        guard monitorDevice != nil else { routeStatus = "未找到显示器的音频设备"; return }
-        routeStatus = isRouted
-            ? (isCombinedActive ? "正在输出到显示器和 MacBook" : "正在输出到显示器")
-            : "当前输出是其他设备，音量键交还系统"
+        let text: String
+        if !enabled {
+            text = "已暂停，音量键由系统处理"
+        } else if monitorDevice == nil {
+            text = "未找到显示器的音频设备"
+        } else if usesSoftware {
+            if macDevice == nil {
+                text = "未找到 MacBook 扬声器"
+            } else if !engineStatus.isEmpty {
+                text = engineStatus
+            } else if AudioSystem.defaultOutput() != macDevice?.id {
+                text = "当前输出是其他设备，混音已暂停"
+            } else {
+                text = engineRunning ? "正在输出：\(activeOutputsTitle)" : "正在启动软件混音…"
+            }
+        } else {
+            text = isRouted ? "正在输出：\(activeOutputsTitle)" : "当前输出是其他设备，音量键交还系统"
+        }
+        if text != routeStatus { routeStatus = text }
     }
 
     // MARK: Volume
@@ -357,7 +601,12 @@ final class Controller: ObservableObject {
     }
 
     func applyVolumes() {
+        defer { updateRouteStatus() }
         guard enabled else { return }
+        if usesSoftware {
+            updateEngineGains()
+            return
+        }
         let effective = shaped(muted ? 0 : master)
         if monitorDevice != nil {
             let monitorShare = monitorMuted ? 0 : monitorLevel * monitorCap
@@ -368,6 +617,28 @@ final class Controller: ObservableObject {
             AudioSystem.setVolume(mac.id, Float32(value))
             AudioSystem.setMute(mac.id, value == 0)
         }
+    }
+
+    /// Perceptual taper for the share sliders: 50% is about 12 dB down.
+    private func taper(_ value: Double) -> Double {
+        let x = max(0, min(1, value))
+        return x * x
+    }
+
+    private func updateEngineGains() {
+        guard #available(macOS 14.2, *), let engine = tapEngine as? TapEngine else { return }
+        // MacBook: the system volume already applies on the device, so only its share here.
+        engine.gains.mac = mode == .combined ? Float(taper(macLevel)) : 0
+        // Monitor: has no volume of its own, so follow the MacBook's volume in decibels.
+        var follow = 0.0
+        if let mac = macDevice, !muted, master > 0.0005 {
+            if let db = AudioSystem.volumeDecibels(mac.id) {
+                follow = pow(10, Double(db) / 20)
+            } else {
+                follow = master * master
+            }
+        }
+        engine.gains.monitor = monitorMuted ? 0 : Float(taper(monitorLevel) * monitorCap * follow)
     }
 
     private func connectDDC(isLaunch: Bool) {
@@ -418,12 +689,52 @@ final class Controller: ObservableObject {
         }
     }
 
+    /// Drops the monitor to 10% for two seconds and restores it, so you can hear whether
+    /// the speakers on the monitor's jack follow DDC at all.
+    func testDDC() {
+        guard let display = ddcDisplay else { ddcStatus = "没有可用的 DDC 显示器"; return }
+        ddcStatus = "测试中：显示器音量降到 10%，两秒后恢复，请听音箱的变化…"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let before = display.read(VCP.volume)
+            let maxValue = before?.max ?? 100
+            let low = UInt16(Double(maxValue) * 0.1)
+            let wrote = display.write(VCP.volume, low)
+            let during = display.read(VCP.volume)
+            Thread.sleep(forTimeInterval: 2)
+            display.write(VCP.volume, before?.current ?? maxValue / 2)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if !wrote {
+                    self.ddcStatus = "测试失败：显示器拒绝了写入命令，请改用软件混音"
+                } else if let during, during.current == low {
+                    self.ddcStatus = "显示器已接受命令（读数变为 \(during.current)）。如果音箱刚才没有变小，说明耳机口不跟随显示器音量，请使用软件混音"
+                } else {
+                    self.ddcStatus = "命令已发送，但显示器读数没有变化，请改用软件混音"
+                }
+            }
+        }
+    }
+
+    /// For software mode: turn the monitor itself all the way up (to the cap) once,
+    /// so Soundweaver's software gain has the full range.
+    func setMonitorHardwareToCap() {
+        guard let display = ddcDisplay else { ddcStatus = "没有可用的 DDC 显示器，请用显示器自己的菜单调高音量"; return }
+        let target = UInt16((ddcMax * monitorCap).rounded())
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let ok = display.write(VCP.volume, target)
+            DispatchQueue.main.async {
+                self?.ddcStatus = ok ? "已把显示器硬件音量设为 \(target)" : "写入失败，请用显示器自己的菜单调高音量"
+            }
+        }
+    }
+
     // MARK: Keys and HUD
 
     private func setupKeys() {
         keyTap.shouldIntercept = { [weak self] in
             guard let self else { return false }
-            return self.enabled && self.interceptKeys && self.isRouted
+            // Software mode leaves the keys to macOS: they change the MacBook volume natively.
+            return self.enabled && !self.usesSoftware && self.interceptKeys && self.isRouted
         }
         keyTap.handler = { [weak self] key, flags, isRepeat in
             self?.handle(key, flags: flags, isRepeat: isRepeat)
@@ -501,7 +812,7 @@ final class Controller: ObservableObject {
            SystemOSD.show(level: level, muted: silent, displayID: displayID, duration: hudDuration) {
             return
         }
-        let title = isCombinedActive ? "\(monitorTitle) + \(macTitle)" : monitorTitle
+        let title = activeOutputsTitle
         CustomHUD.shared.show(title: title, level: level, muted: silent, on: screen,
                               position: hudPosition, duration: hudDuration)
     }

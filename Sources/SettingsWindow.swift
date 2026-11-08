@@ -384,7 +384,37 @@ struct DevicesPage: View {
 
 struct VolumePage: View {
     @EnvironmentObject var c: Controller
+
+    var engineDetail: String {
+        if !VolumeEngine.softwareAvailable { return "软件混音需要 macOS 14.2 或更新版本" }
+        return c.engineMode == .software
+            ? "Soundweaver 直接调整送往显示器的声音，不依赖 DDC。总音量就是 MacBook 的系统音量，音量键和系统提示框都由 macOS 原生处理"
+            : "通过 DDC 调整显示器的硬件音量。只有接在显示器上的音箱会跟随显示器音量时才有效"
+    }
+
     var body: some View {
+        SettingRow(title: "音量控制方式", detail: engineDetail) {
+            Picker("", selection: $c.engineMode) {
+                Text("软件混音（推荐）").tag(VolumeEngine.software)
+                Text("显示器硬件音量（DDC）").tag(VolumeEngine.ddc)
+            }
+            .labelsHidden()
+            .frame(width: 200)
+            .disabled(!VolumeEngine.softwareAvailable)
+        }
+        if c.usesSoftware {
+            SettingRow(title: "系统录音权限",
+                       detail: c.captureGranted
+                           ? "已授权"
+                           : "软件混音需要在“隐私与安全性 > 屏幕与系统录音”中允许 Soundweaver 录制系统音频") {
+                Button("打开设置") { c.openAudioCaptureSettings() }
+            }
+            SettingRow(title: "混音状态", detail: c.routeStatus) {
+                Image(systemName: c.engineRunning ? "checkmark.circle.fill" : "pause.circle.fill")
+                    .font(.system(size: 18))
+                    .foregroundColor(c.engineRunning ? .green : .orange)
+            }
+        }
         SettingRow(title: "每次按键的步进", detail: "按住 Option 和 Shift 时步进再细分为四分之一") {
             Picker("", selection: $c.stepCount) {
                 Text("16 格（系统默认）").tag(16)
@@ -428,6 +458,12 @@ struct DDCPage: View {
             Image(systemName: c.ddcConnected ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                 .font(.system(size: 18))
                 .foregroundColor(c.ddcConnected ? .green : .orange)
+        }
+        SettingRow(title: "测试 DDC 音量", detail: "显示器音量降到 10% 两秒再恢复，用来确认音箱是否跟随") {
+            Button("测试") { c.testDDC() }.disabled(!c.ddcConnected)
+        }
+        SettingRow(title: "把显示器音量调到上限", detail: "使用软件混音时建议执行一次，让 Soundweaver 有完整的调节范围") {
+            Button("调到上限") { c.setMonitorHardwareToCap() }.disabled(!c.ddcConnected)
         }
         SettingRow(title: "读取显示器当前音量") {
             Button("读取") { c.readMonitorVolume() }.disabled(!c.ddcConnected)

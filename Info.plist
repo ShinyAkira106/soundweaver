@@ -13,15 +13,17 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.4.0</string>
+    <string>1.6.0</string>
     <key>CFBundleVersion</key>
-    <string>140</string>
+    <string>160</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Soundweaver 需要读取系统播放的声音，才能把它按你设定的比例同时送到显示器和 MacBook 扬声器。声音不会被保存或上传。</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © ShinyAkira 2026. MIT License.</string>
 </dict>
