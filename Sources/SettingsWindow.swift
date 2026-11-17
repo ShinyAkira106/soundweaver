@@ -459,6 +459,10 @@ struct DDCPage: View {
                 .font(.system(size: 18))
                 .foregroundColor(c.ddcConnected ? .green : .orange)
         }
+        SettingRow(title: "重新连接后恢复音量",
+                   detail: "显示器唤醒、重新插线或切换输入后，自动重新连接 DDC，等显示器准备好，再反复写入你设定的音量并读回确认，防止它回到自己原来的音量") {
+            Toggle("", isOn: $c.restoreOnReconnect).toggleStyle(.switch).labelsHidden()
+        }
         SettingRow(title: "测试 DDC 音量", detail: "显示器音量降到 10% 两秒再恢复，用来确认音箱是否跟随") {
             Button("测试") { c.testDDC() }.disabled(!c.ddcConnected)
         }

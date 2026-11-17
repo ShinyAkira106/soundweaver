@@ -6,7 +6,7 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-6b52e0"></a>
   <img alt="macOS 14.2+" src="https://img.shields.io/badge/macOS-14.2%2B-6b52e0?logo=apple">
   <img alt="Swift" src="https://img.shields.io/badge/Swift-SwiftUI-6b52e0?logo=swift&logoColor=white">
-  <a href="https://github.com/ShinyAkira106/Soundweaver/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.6.0-6b52e0"></a>
+  <a href="https://github.com/ShinyAkira106/Soundweaver/releases"><img alt="Version" src="https://img.shields.io/badge/version-1.6.1-6b52e0"></a>
   <a href="https://github.com/ShinyAkira106"><img alt="Author: ShinyAkira" src="https://img.shields.io/badge/author-ShinyAkira-6b52e0?logo=github"></a>
 </p>
 
@@ -26,9 +26,9 @@ The Soundweaver panel in the menu bar.
 
 ## 安装 / Install
 
-从 [Releases](https://github.com/ShinyAkira106/Soundweaver/releases) 下载 `Soundweaver-1.6.0.dmg`，打开后把 Soundweaver 拖进“应用程序”文件夹。软件混音需要 macOS 14.2 或更新版本。由于应用没有经过苹果公证，第一次打开时如果被系统拦下，请到“系统设置 > 隐私与安全性”最下面点“仍要打开”。
+从 [Releases](https://github.com/ShinyAkira106/Soundweaver/releases) 下载 `Soundweaver-1.6.1.dmg`，打开后把 Soundweaver 拖进“应用程序”文件夹。软件混音需要 macOS 14.2 或更新版本。由于应用没有经过苹果公证，第一次打开时如果被系统拦下，请到“系统设置 > 隐私与安全性”最下面点“仍要打开”。
 
-Download `Soundweaver-1.6.0.dmg` from [Releases](https://github.com/ShinyAkira106/Soundweaver/releases), open it and drag Soundweaver into Applications. The software mix needs macOS 14.2 or later. The app is not notarized by Apple, so if macOS stops it on first launch, click Open Anyway at the bottom of System Settings > Privacy & Security.
+Download `Soundweaver-1.6.1.dmg` from [Releases](https://github.com/ShinyAkira106/Soundweaver/releases), open it and drag Soundweaver into Applications. The software mix needs macOS 14.2 or later. The app is not notarized by Apple, so if macOS stops it on first launch, click Open Anyway at the bottom of System Settings > Privacy & Security.
 
 第一次启动时，macOS 会请求“系统录音”权限，请点允许。如果错过了，可以到“系统设置 > 隐私与安全性 > 屏幕与系统录音”，在“仅系统录音”下打开 Soundweaver，它会在几秒内自动开始工作。Soundweaver 只在本机实时处理声音，不会保存或上传。然后用显示器自己的按键把显示器音量调到最大，之后显示器的音量就交给 Soundweaver 控制。
 
@@ -67,6 +67,12 @@ The system output stays on the MacBook speakers, so macOS handles F10, F11 and F
 原来的 DDC 方式仍然保留，可以在设置的“音量调节”页面切换。它通过 DDC/CI 写入 VCP 0x62 改变显示器自己的音量，并接管键盘音量键，适合耳机口会跟随显示器音量的显示器。“显示器 DDC”页面里有一个测试按钮，会把显示器音量降到 10% 两秒再恢复，用来判断你的显示器属于哪一种。
 
 The original DDC method is still available on the Volume page in settings. It writes VCP 0x62 over DDC/CI to change the monitor's own volume and takes over the volume keys, which suits monitors whose headphone jack follows their volume. The Monitor DDC page has a Test button that drops the monitor to 10% for two seconds and restores it, so you can tell which kind of monitor you have.
+
+### 重新连接后自动恢复 / Recovery after reconnecting
+
+显示器休眠唤醒、重新插线或切换输入后，它的 DDC 连接会变成一个新的连接，而且显示器需要几秒钟才能响应，启动完成后还可能恢复成它自己原来的音量。Soundweaver 会在这些时候自动重新连接：先等显示器准备好，连不上就每隔 1.5 秒重试，连上后每秒写入一次你设定的音量并读回确认，直到显示器连续两次保持住为止。如果连续两次写入失败，它也会自己重新连接。这个行为可以在“显示器 DDC”页面关闭。
+
+When the monitor wakes from sleep, is replugged or switches input, its DDC connection is replaced by a new one, the monitor needs a few seconds before it answers, and it may restore its own old volume once it has started. Soundweaver reconnects automatically at those moments: it waits for the monitor, retries every 1.5 seconds until it answers, then writes your volume once a second and reads it back until the monitor has kept it twice in a row. Two failed writes in a row also make it reconnect on its own. This can be turned off on the Monitor DDC page.
 
 ### 细节设置 / Fine tuning
 
@@ -136,9 +142,9 @@ docs/images/                 README 截图和示意图 / README screenshots and 
 
 ## 致谢 / Acknowledgements
 
-DDC 通信和系统提示框的实现思路参考了 [MonitorControl](https://github.com/MonitorControl/MonitorControl)（MIT 许可）和 [m1ddc](https://github.com/waydabber/m1ddc)，系统音频捕获参考了 Apple 的 Core Audio 进程捕获接口和 [AudioCap](https://github.com/insidegui/AudioCap) 示例。Soundweaver 是独立编写的代码。
+DDC 通信和系统提示框的实现思路参考了 [MonitorControl](https://github.com/MonitorControl/MonitorControl)（MIT 许可）、[AppleSiliconDDC](https://github.com/waydabber/AppleSiliconDDC) 和 [m1ddc](https://github.com/waydabber/m1ddc)，重新连接后的恢复流程参考了 MonitorControl 的唤醒处理，系统音频捕获参考了 Apple 的 Core Audio 进程捕获接口和 [AudioCap](https://github.com/insidegui/AudioCap) 示例。Soundweaver 是独立编写的代码。
 
-The DDC and system HUD approach follows [MonitorControl](https://github.com/MonitorControl/MonitorControl) (MIT licensed) and [m1ddc](https://github.com/waydabber/m1ddc), and the system audio capture follows Apple's Core Audio process tap API and the [AudioCap](https://github.com/insidegui/AudioCap) sample. Soundweaver is independently written.
+The DDC and system HUD approach follows [MonitorControl](https://github.com/MonitorControl/MonitorControl) (MIT licensed), [AppleSiliconDDC](https://github.com/waydabber/AppleSiliconDDC) and [m1ddc](https://github.com/waydabber/m1ddc), the recovery after reconnecting follows MonitorControl's wake handling, and the system audio capture follows Apple's Core Audio process tap API and the [AudioCap](https://github.com/insidegui/AudioCap) sample. Soundweaver is independently written.
 
 ## 作者 / Author
 

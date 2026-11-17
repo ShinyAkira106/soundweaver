@@ -56,19 +56,34 @@ final class DDCDisplay {
         return candidates.first { $0.read(VCP.volume) != nil } ?? candidates.first
     }
 
+    /// Writes a VCP value. Each attempt sends the packet twice (as MonitorControl and
+    /// AppleSiliconDDC do); failed attempts are retried after a short pause.
     @discardableResult
-    func write(_ code: UInt8, _ value: UInt16) -> Bool {
+    func write(_ code: UInt8, _ value: UInt16, attempts: Int = 3) -> Bool {
         guard let writeI2C = IOAV.write else { return false }
         var packet: [UInt8] = [0x84, 0x03, code, UInt8(value >> 8), UInt8(value & 0xFF), 0]
         packet[5] = 0x6E ^ 0x51 ^ packet[0] ^ packet[1] ^ packet[2] ^ packet[3] ^ packet[4]
-        var ok = false
-        for _ in 0..<2 {   // sending twice is what MonitorControl does for reliability
-            usleep(10_000)
-            if writeI2C(service, Self.chipAddress, Self.dataAddress, &packet, UInt32(packet.count)) == KERN_SUCCESS {
-                ok = true
+        for attempt in 0..<max(1, attempts) {
+            if attempt > 0 { usleep(20_000) }
+            var ok = false
+            for _ in 0..<2 {
+                usleep(10_000)
+                if writeI2C(service, Self.chipAddress, Self.dataAddress, &packet, UInt32(packet.count)) == KERN_SUCCESS {
+                    ok = true
+                }
             }
+            if ok { return true }
         }
-        return ok
+        return false
+    }
+
+    /// Writes, then reads back to confirm the monitor really took the value.
+    /// Some monitors acknowledge writes while they are still waking up and then ignore them.
+    func writeVerified(_ code: UInt8, _ value: UInt16) -> Bool {
+        guard write(code, value) else { return false }
+        usleep(60_000)
+        guard let reading = read(code) else { return false }
+        return reading.current == value
     }
 
     func read(_ code: UInt8) -> (current: UInt16, max: UInt16)? {
@@ -101,6 +116,8 @@ final class DDCVolumeWriter {
     private var pending: UInt16?
     private var draining = false
     private var display: DDCDisplay?
+    private var lastRequested: UInt16?
+    private var currentGeneration = 0
     /// Called on the main queue after each write with whether the monitor accepted it.
     var onResult: ((Bool) -> Void)?
 
@@ -108,9 +125,33 @@ final class DDCVolumeWriter {
         lock.lock(); self.display = display; lock.unlock()
     }
 
+    /// Forgets a display whose connection has gone stale.
+    func detach() {
+        lock.lock(); display = nil; pending = nil; lock.unlock()
+    }
+
+    /// Bumped by the controller on every reconnect or sleep, so a running restore can stop.
+    var generation: Int {
+        get { lock.lock(); defer { lock.unlock() }; return currentGeneration }
+        set { lock.lock(); currentGeneration = newValue; lock.unlock() }
+    }
+
+    /// The value most recently asked for, so a restore always uses the latest target.
+    var latestTarget: UInt16? {
+        lock.lock(); defer { lock.unlock() }
+        return lastRequested
+    }
+
+    /// Runs DDC work on the same serial queue as the volume writes, so two I2C
+    /// transactions never overlap.
+    func perform(_ work: @escaping () -> Void) {
+        queue.async(execute: work)
+    }
+
     func set(_ value: UInt16) {
         lock.lock()
         pending = value
+        lastRequested = value
         let start = !draining
         if start { draining = true }
         lock.unlock()

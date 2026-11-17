@@ -147,6 +147,10 @@ final class Controller: ObservableObject {
     @Published var restoreOnQuit: Bool {
         didSet { defaults.set(restoreOnQuit, forKey: "restoreOnQuit") }
     }
+    /// After sleep, a replug or an input switch, reconnect DDC and write the volume again.
+    @Published var restoreOnReconnect: Bool {
+        didSet { defaults.set(restoreOnReconnect, forKey: "restoreOnReconnect") }
+    }
     @Published var syncFromMonitorOnLaunch: Bool {
         didSet { defaults.set(syncFromMonitorOnLaunch, forKey: "syncFromMonitorOnLaunch") }
     }
@@ -251,7 +255,7 @@ final class Controller: ObservableObject {
             "useNativeHUD": true, "hudPosition": HUDPosition.topRight.rawValue,
             "hudScreen": HUDScreen.mouse.rawValue, "hudDuration": 1.2,
             "interceptKeys": true, "optionOpensSound": true, "allowRepeat": true,
-            "restoreOnQuit": true, "syncFromMonitorOnLaunch": false,
+            "restoreOnQuit": true, "syncFromMonitorOnLaunch": false, "restoreOnReconnect": true,
         ])
         enabled = defaults.bool(forKey: "enabled")
         let storedEngine = VolumeEngine(rawValue: defaults.string(forKey: "volumeEngine") ?? "") ?? .software
@@ -279,16 +283,15 @@ final class Controller: ObservableObject {
         allowRepeat = defaults.bool(forKey: "allowRepeat")
         restoreOnQuit = defaults.bool(forKey: "restoreOnQuit")
         syncFromMonitorOnLaunch = defaults.bool(forKey: "syncFromMonitorOnLaunch")
+        restoreOnReconnect = defaults.bool(forKey: "restoreOnReconnect")
         launchAtLogin = SMAppService.mainApp.status == .enabled
 
         AudioSystem.destroyLeftover(uid: Self.aggregateUID)
         refreshDevices()
-        connectDDC(isLaunch: true)
         setupKeys()
-        ddc.onResult = { [weak self] ok in
-            guard let self, !ok, !self.usesSoftware else { return }
-            self.ddcStatus = "写入失败：显示器没有接受音量命令"
-        }
+        ddc.onResult = { [weak self] ok in self?.ddcWriteFinished(ok) }
+        watchDisplaysAndSleep()
+        scheduleDDCReconnect(after: 0, reason: "正在检测 DDC…", isLaunch: true)
 
         AudioSystem.onSystemChange(kAudioHardwarePropertyDevices) { [weak self] in self?.devicesChanged(force: false) }
         AudioSystem.onSystemChange(kAudioHardwarePropertyDefaultOutputDevice) { [weak self] in self?.defaultOutputChanged() }
@@ -325,12 +328,17 @@ final class Controller: ObservableObject {
         let after = (monitorDevice?.uid, macDevice?.uid)
         if enabled && (force || before.0 != after.0 || before.1 != after.1) { activate() }
         updateRouteStatus()
+        // The monitor's audio device came back (replug, input switch, wake): its DDC
+        // connection is new too, and the monitor needs a moment before it answers.
+        if after.0 != nil && before.0 != after.0 {
+            scheduleDDCReconnect(after: 2, reason: "显示器已重新连接，正在等待它准备好…")
+        }
     }
 
     /// Re-detects audio devices and the DDC connection.
     func rescan() {
         refreshDevices()
-        connectDDC(isLaunch: false)
+        scheduleDDCReconnect(after: 0, reason: "正在重新检测 DDC…")
         if enabled { activate() }
         lastScan = Date()
     }
@@ -609,8 +617,7 @@ final class Controller: ObservableObject {
         }
         let effective = shaped(muted ? 0 : master)
         if monitorDevice != nil {
-            let monitorShare = monitorMuted ? 0 : monitorLevel * monitorCap
-            ddc.set(UInt16((effective * monitorShare * ddcMax).rounded()))
+            ddc.set(monitorDDCTarget())
         }
         if isCombinedActive, let mac = macDevice {
             let value = effective * macLevel
@@ -641,42 +648,190 @@ final class Controller: ObservableObject {
         engine.gains.monitor = monitorMuted ? 0 : Float(taper(monitorLevel) * monitorCap * follow)
     }
 
-    private func connectDDC(isLaunch: Bool) {
-        ddcStatus = "正在检测 DDC…"
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+    // MARK: DDC connection and recovery
+    //
+    // A monitor's DDC connection is recreated whenever it sleeps, is replugged or switches
+    // input, and the old handle silently stops working. Right after it comes back, the monitor
+    // also needs a few seconds before it answers, and it may restore its own old volume once
+    // it has finished starting up. So, like MonitorControl, Soundweaver waits, reconnects,
+    // retries until the monitor answers, then writes the volume again several times and reads
+    // it back until the monitor has kept it.
+
+    private static let ddcConnectAttempts = 6
+    private var ddcGeneration = 0
+    private var isAsleep = false
+    private var ddcReconnecting = false
+    private var ddcFailures = 0
+    private var lastAutoReconnect = Date.distantPast
+
+    /// What the monitor's hardware volume should be right now: the mixed level in DDC mode,
+    /// or simply its cap in software mode (where Soundweaver scales the audio itself).
+    private func monitorDDCTarget() -> UInt16 {
+        if usesSoftware { return UInt16((ddcMax * monitorCap).rounded()) }
+        let effective = shaped(muted ? 0 : master)
+        let share = monitorMuted ? 0 : monitorLevel * monitorCap
+        return UInt16((effective * share * ddcMax).rounded())
+    }
+
+    private func bumpDDCGeneration() -> Int {
+        ddcGeneration += 1
+        ddc.generation = ddcGeneration
+        return ddcGeneration
+    }
+
+    private func watchDisplaysAndSleep() {
+        CGDisplayRegisterReconfigurationCallback({ _, flags, userInfo in
+            guard let userInfo, !flags.contains(.beginConfigurationFlag) else { return }
+            let controller = Unmanaged<Controller>.fromOpaque(userInfo).takeUnretainedValue()
+            DispatchQueue.main.async { controller.displaysReconfigured() }
+        }, Unmanaged.passUnretained(self).toOpaque())
+
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification] {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.isAsleep = true
+                _ = self.bumpDDCGeneration()   // stop anything in flight
+            }
+        }
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.isAsleep = false
+                // Some displays take a few seconds to recover after waking.
+                self.scheduleDDCReconnect(after: 3, reason: "已唤醒，正在等待显示器准备好…")
+            }
+        }
+    }
+
+    func displaysReconfigured() {
+        guard !isAsleep else { return }
+        scheduleDDCReconnect(after: 2, reason: "显示器配置已改变，正在重新连接…")
+    }
+
+    /// Waits for the monitor to settle, then reconnects. Repeated requests collapse into the last one.
+    func scheduleDDCReconnect(after delay: TimeInterval, reason: String, isLaunch: Bool = false) {
+        let generation = bumpDDCGeneration()
+        ddcReconnecting = true
+        ddcStatus = reason
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, generation == self.ddcGeneration, !self.isAsleep else { return }
+            self.connectDDC(generation: generation, attempt: 1, isLaunch: isLaunch)
+        }
+    }
+
+    private func connectDDC(generation: Int, attempt: Int, isLaunch: Bool) {
+        ddc.detach()
+        ddc.perform { [weak self] in
             let display = DDCDisplay.connect()
             let reading = display?.read(VCP.volume)
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, generation == self.ddcGeneration else { return }
+
+                // Not answering yet: a freshly woken monitor often needs a few more seconds.
+                if reading == nil && attempt < Self.ddcConnectAttempts {
+                    self.ddcStatus = "正在等待显示器响应（第 \(attempt) 次）…"
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                        guard let self, generation == self.ddcGeneration, !self.isAsleep else { return }
+                        self.connectDDC(generation: generation, attempt: attempt + 1, isLaunch: isLaunch)
+                    }
+                    return
+                }
+
+                self.ddcReconnecting = false
                 guard let display else {
+                    self.ddcDisplay = nil
                     self.ddcConnected = false
                     self.ddcStatus = "未找到可用的 DDC 显示器，需要 Apple 芯片，建议用 USB-C 或 DP 连接"
                     return
                 }
                 self.ddcDisplay = display
                 self.ddcConnected = true
+                self.ddcFailures = 0
                 self.ddc.attach(display)
-                if let reading, reading.max > 0 {
-                    self.ddcMax = Double(reading.max)
-                    self.ddcStatus = "已连接，显示器音量 \(reading.current) / \(reading.max)"
-                    let share = self.monitorLevel * self.monitorCap
-                    if isLaunch, self.syncFromMonitorOnLaunch, share > 0 {
-                        let linear = min(1, Double(reading.current) / self.ddcMax / share)
-                        self.master = pow(linear, 1 / max(0.5, self.curve))
-                    }
-                } else {
+
+                guard let reading, reading.max > 0 else {
                     self.ddcStatus = "已连接，但读不到音量，按 0 到 100 处理"
+                    self.restoreMonitorVolume(generation: generation, readable: false)
+                    return
                 }
-                self.applyVolumes()
+                self.ddcMax = Double(reading.max)
+                self.ddcStatus = "已连接，显示器音量 \(reading.current) / \(reading.max)"
+
+                let share = self.monitorLevel * self.monitorCap
+                if isLaunch, self.syncFromMonitorOnLaunch, !self.usesSoftware, share > 0 {
+                    // Take the monitor's volume as the starting point instead of overwriting it.
+                    let linear = min(1, Double(reading.current) / self.ddcMax / share)
+                    self.master = pow(linear, 1 / max(0.5, self.curve))
+                    return
+                }
+                self.restoreMonitorVolume(generation: generation, readable: true)
             }
         }
+    }
+
+    /// Writes the target volume again, once a second, until the monitor has kept it twice in a
+    /// row (or, if it cannot be read back, five times), for at most about eight seconds.
+    private func restoreMonitorVolume(generation: Int, readable: Bool) {
+        guard enabled, let display = ddcDisplay else { return }
+        if !usesSoftware {
+            applyVolumes()   // the normal write, which also records the latest target
+        }
+        guard restoreOnReconnect else { return }
+
+        let software = usesSoftware
+        let fixedTarget = monitorDDCTarget()
+        let writer = ddc
+        let needed = readable ? 2 : 5
+        ddcStatus = "已连接，正在恢复显示器音量…"
+
+        writer.perform { [weak self] in
+            var kept = 0
+            var target = fixedTarget
+            for round in 0..<8 {
+                guard writer.generation == generation else { return }
+                if round > 0 { Thread.sleep(forTimeInterval: 1) }
+                guard writer.generation == generation else { return }
+                target = software ? fixedTarget : (writer.latestTarget ?? fixedTarget)
+                let ok = readable ? display.writeVerified(VCP.volume, target)
+                                  : display.write(VCP.volume, target)
+                kept = ok ? kept + 1 : 0
+                if kept >= needed { break }
+            }
+            let finalTarget = target
+            let success = kept >= needed
+            DispatchQueue.main.async {
+                guard let self, generation == self.ddcGeneration else { return }
+                self.ddcStatus = success
+                    ? "已连接，显示器音量已恢复为 \(finalTarget)"
+                    : "已连接，但显示器没有保持音量；按一下音量键可以再写一次"
+            }
+        }
+    }
+
+    /// Two failed writes in a row usually mean the connection went stale without any
+    /// notification (for example a KVM or input switch), so reconnect on our own.
+    private func ddcWriteFinished(_ ok: Bool) {
+        guard !usesSoftware else { return }
+        if ok {
+            ddcFailures = 0
+            return
+        }
+        // While reconnecting, writes are expected to fail; the restore will catch up.
+        guard !ddcReconnecting, !isAsleep else { return }
+        ddcFailures += 1
+        ddcStatus = "写入失败：显示器没有接受音量命令"
+        guard ddcFailures >= 2,
+              Date().timeIntervalSince(lastAutoReconnect) > 10 else { return }
+        lastAutoReconnect = Date()
+        scheduleDDCReconnect(after: 0.5, reason: "连接似乎已中断，正在重新连接显示器…")
     }
 
     /// Reads the monitor's current hardware volume for the DDC page.
     func readMonitorVolume() {
         guard let display = ddcDisplay else { return }
         ddcStatus = "正在读取…"
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        ddc.perform { [weak self] in
             let reading = display.read(VCP.volume)
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -694,7 +849,7 @@ final class Controller: ObservableObject {
     func testDDC() {
         guard let display = ddcDisplay else { ddcStatus = "没有可用的 DDC 显示器"; return }
         ddcStatus = "测试中：显示器音量降到 10%，两秒后恢复，请听音箱的变化…"
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        ddc.perform { [weak self] in
             let before = display.read(VCP.volume)
             let maxValue = before?.max ?? 100
             let low = UInt16(Double(maxValue) * 0.1)
@@ -720,7 +875,7 @@ final class Controller: ObservableObject {
     func setMonitorHardwareToCap() {
         guard let display = ddcDisplay else { ddcStatus = "没有可用的 DDC 显示器，请用显示器自己的菜单调高音量"; return }
         let target = UInt16((ddcMax * monitorCap).rounded())
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        ddc.perform { [weak self] in
             let ok = display.write(VCP.volume, target)
             DispatchQueue.main.async {
                 self?.ddcStatus = ok ? "已把显示器硬件音量设为 \(target)" : "写入失败，请用显示器自己的菜单调高音量"
